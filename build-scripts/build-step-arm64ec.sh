@@ -14,9 +14,23 @@ export LLVM_MINGW_TOOLCHAIN="$HOME/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22
 export TARGET=aarch64-linux-android28
 export PATH=$LLVM_MINGW_TOOLCHAIN:$PATH
 
-export CC=$TOOLCHAIN/$TARGET-clang
-export AS=$CC
-export CXX=$TOOLCHAIN/$TARGET-clang++
+# ccache: cache compiled objects so re-runs with unchanged Wine source skip recompilation. Unix side:
+# wrap the full-path NDK clang. PE side (--with-mingw=clang, resolved via PATH): masquerade clang/clang++
+# with ccache symlinks placed first on PATH, so Wine's cross-compiler calls go through ccache too.
+if command -v ccache >/dev/null 2>&1; then
+  export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+  ccache -M 3G >/dev/null 2>&1 || true
+  mkdir -p "$HOME/ccache-bin"
+  ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang"
+  ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang++"
+  export PATH="$HOME/ccache-bin:$PATH"
+  export CC="ccache $TOOLCHAIN/$TARGET-clang"
+  export CXX="ccache $TOOLCHAIN/$TARGET-clang++"
+else
+  export CC=$TOOLCHAIN/$TARGET-clang
+  export CXX=$TOOLCHAIN/$TARGET-clang++
+fi
+export AS=$TOOLCHAIN/$TARGET-clang
 export AR=$TOOLCHAIN/llvm-ar
 export LD=$TOOLCHAIN/ld
 export RANLIB=$TOOLCHAIN/llvm-ranlib
@@ -27,9 +41,13 @@ export PKG_CONFIG_LIBDIR=$deps/lib/pkgconfig:$deps/share/pkgconfig
 export ACLOCAL_PATH=$deps/lib/aclocal:$deps/share/aclocal
 export CPPFLAGS="-I$deps/include --sysroot=$TOOLCHAIN/../sysroot"
 
-export C_OPTS="-Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
+# -g0 = don't emit debug info (the bulk of the tree size); -O2 = normal release optimisation.
+# Applied to the ELF/unix side via CFLAGS below and to the arm64ec PE side via CROSSCFLAGS.
+# (A post-install llvm-strip pass in --install trims the remaining symbol tables.)
+export C_OPTS="-g0 -O2 -Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
 export CFLAGS=$C_OPTS
 export CXXFLAGS=$C_OPTS
+export CROSSCFLAGS="-g0 -O2"
 export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib"
 
 export FREETYPE_CFLAGS="-I$deps/include/freetype2"
@@ -136,8 +154,8 @@ do
       --without-xcomposite \
       --without-xfixes \
       --without-xinerama \
-      --without-xrandr \
-      --without-xrender \
+      --with-xrandr \
+      --with-xrender \
       --without-xshape \
       --with-xshm \
       --without-xxf86vm
@@ -255,6 +273,9 @@ do
       # 5. Internal Headers
       "test-bylaws/include_winternl_h.patch"
 
+      # 5a. FEX unixlib load-by-name (MemoryWineLoadUnixLibByName = 1002)
+      "test-bylaws/include_wine_unixlib_h.patch"
+
       # 6. build vcruntime140_1 with aarch64
       "test-bylaws/dlls_vcruntime140_1_vcruntime140_1_spec.patch"
 
@@ -293,5 +314,19 @@ do
     cp -r $install_dir/bin/notepad $OUTPUT_DIR/bin
     cp -r $install_dir/lib/wine  $OUTPUT_DIR/lib
     cp -r $install_dir/share/wine  $OUTPUT_DIR/share
+
+    # Strip the packaged binaries to shrink the tree. llvm-strip ($STRIP) is arm64ec/COFF-aware AND
+    # handles ELF, so it strips both the PE DLLs/EXEs and the unix .so loaders. --strip-all keeps the
+    # PE export directory + ELF .dynsym (so DLLs still resolve and .so still loads); falls back to
+    # --strip-debug. Non-fatal per file so an unexpected format can never fail the build.
+    echo "Stripping binaries with llvm-strip to shrink the tree..."
+    before_mb=$(du -sm "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+    find "$OUTPUT_DIR/lib" "$OUTPUT_DIR/bin" -type f \
+      \( -name '*.dll' -o -name '*.exe' -o -name '*.drv' -o -name '*.so' -o -name 'wine' -o -name 'wine-preloader' \) \
+      -print0 2>/dev/null | while IFS= read -r -d '' f; do
+        "$STRIP" --strip-all "$f" 2>/dev/null || "$STRIP" --strip-debug "$f" 2>/dev/null || true
+      done
+    after_mb=$(du -sm "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+    echo "OUTPUT tree: ${before_mb}MB -> ${after_mb}MB after strip."
   fi
 done
