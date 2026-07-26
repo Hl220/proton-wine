@@ -211,13 +211,13 @@ jobs:
           # Create Proton WCP - txz format
           cp $GITHUB_WORKSPACE/prefixPack.txz .
           cp $GITHUB_WORKSPACE/profile.json .
-          tar cJf proton-10.0-4-$ARCH_NAME.wcp bin lib share prefixPack.txz profile.json
+          tar -I 'zstd -20 --ultra' -cf proton-10.0-4-$ARCH_NAME.wcp bin lib share prefixPack.txz profile.json
           mv proton-10.0-4-$ARCH_NAME.wcp $GITHUB_WORKSPACE/
           
-          # Create Wine WCP for CMOD & Ludashi - wcp.xz format
+          # Create Wine WCP for CMOD & Ludashi - wcp format
           cp $GITHUB_WORKSPACE/profile-wine.json profile.json
-          tar cJf proton-wine-10.0-4-$ARCH_NAME.wcp.xz bin lib share prefixPack.txz profile.json
-          mv proton-wine-10.0-4-$ARCH_NAME.wcp.xz $GITHUB_WORKSPACE/
+          tar -I 'zstd -20 --ultra' -cf proton-wine-10.0-4-$ARCH_NAME.wcp bin lib share prefixPack.txz profile.json
+          mv proton-wine-10.0-4-$ARCH_NAME.wcp $GITHUB_WORKSPACE/
       
       - name: Upload build artifacts
         run: |
@@ -239,7 +239,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proton-wine-${{ env.ARCH_NAME }}
-          path: proton-wine-10.0-4-${{ env.ARCH_NAME }}.wcp.xz
+          path: proton-wine-10.0-4-${{ env.ARCH_NAME }}.wcp
           retention-days: 30
   
   release:
@@ -257,7 +257,7 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -name "*.wcp" -exec cp {} release/ \;
-          find artifacts -name "*.wcp.xz" -exec cp {} release/ \;
+          find artifacts -name "*.wcp" -exec cp {} release/ \;
           ls -lah release/
       
       - name: Generate date-based tag
@@ -295,7 +295,7 @@ jobs:
             - `proton-10.0-4-arm64ec.wcp` - For GameNative
             
             **Wine Type:**
-            - `proton-wine-10.0-4-x86_64.wcp.xz` - For Winlator for CMOD & Ludashi
-            - `proton-wine-10.0-4-arm64ec.wcp.xz` - For Winlator for CMOD & Ludashi
+            - `proton-wine-10.0-4-x86_64.wcp` - For Winlator for CMOD & Ludashi
+            - `proton-wine-10.0-4-arm64ec.wcp` - For Winlator for CMOD & Ludashi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
