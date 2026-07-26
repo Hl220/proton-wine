@@ -14,9 +14,23 @@ export LLVM_MINGW_TOOLCHAIN="$HOME/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22
 export TARGET=x86_64-linux-android28
 export PATH=$LLVM_MINGW_TOOLCHAIN:$PATH
 
-export CC=$TOOLCHAIN/$TARGET-clang
-export AS=$CC
-export CXX=$TOOLCHAIN/$TARGET-clang++
+# ccache: cache compiled objects so re-runs with unchanged Wine source skip recompilation. Unix side:
+# wrap the full-path NDK clang. PE side (--with-mingw=clang, resolved via PATH): masquerade clang/clang++
+# with ccache symlinks placed first on PATH, so Wine's cross-compiler calls go through ccache too.
+if command -v ccache >/dev/null 2>&1; then
+  export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+  ccache -M 3G >/dev/null 2>&1 || true
+  mkdir -p "$HOME/ccache-bin"
+  ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang"
+  ln -sf "$(command -v ccache)" "$HOME/ccache-bin/clang++"
+  export PATH="$HOME/ccache-bin:$PATH"
+  export CC="ccache $TOOLCHAIN/$TARGET-clang"
+  export CXX="ccache $TOOLCHAIN/$TARGET-clang++"
+else
+  export CC=$TOOLCHAIN/$TARGET-clang
+  export CXX=$TOOLCHAIN/$TARGET-clang++
+fi
+export AS=$TOOLCHAIN/$TARGET-clang
 export AR=$TOOLCHAIN/llvm-ar
 export LD=$TOOLCHAIN/ld
 export RANLIB=$TOOLCHAIN/llvm-ranlib
@@ -27,9 +41,13 @@ export PKG_CONFIG_LIBDIR=$deps/lib/pkgconfig:$deps/share/pkgconfig
 export ACLOCAL_PATH=$deps/lib/aclocal:$deps/share/aclocal
 export CPPFLAGS="-I$deps/include --sysroot=$TOOLCHAIN/../sysroot"
 
-export C_OPTS="-march=x86-64 -mtune=generic -Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
+# -g0 = don't emit debug info (the bulk of the tree size); -O2 = normal release optimisation.
+# Applied to the unix side via CFLAGS and to the x86_64 PE side via CROSSCFLAGS.
+# (A post-install llvm-strip pass in --install trims the remaining symbol tables.)
+export C_OPTS="-march=x86-64 -mtune=generic -g0 -O2 -Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
 export CFLAGS=$C_OPTS
 export CXXFLAGS=$C_OPTS
+export CROSSCFLAGS="-g0 -O2"
 export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib"
 
 export FREETYPE_CFLAGS="-I$deps/include/freetype2"
@@ -136,8 +154,8 @@ do
       --without-xcomposite \
       --without-xfixes \
       --without-xinerama \
-      --without-xrandr \
-      --without-xrender \
+      --with-xrandr \
+      --with-xrender \
       --without-xshape \
       --without-xshm \
       --without-xxf86vm
@@ -170,6 +188,13 @@ do
       "dlls_ntdll_unix_sync.c.patch"
       "dlls_ntdll_unix_virtual.c.patch"
 	  "dlls_ntdll_unix_signal_x86_64.c.patch"
+
+      # unixlib load-by-name (MemoryWineLoadUnixLibByName) — defining patches
+      # required because the shared loader.c/virtual.c patches reference them
+      "dlls_ntdll_unix_unix_private.h.patch"
+      "dlls_wow64_virtual.c.patch"
+      "include_wine_unixlib.h.patch"
+      "include_winternl.h.patch"
 	  
 	  # opengl32
 	  "dlls_opengl32_unix_wgl.c.patch"
@@ -266,6 +291,19 @@ do
     cp -r $install_dir/bin/notepad $OUTPUT_DIR/bin
     cp -r $install_dir/lib/wine  $OUTPUT_DIR/lib
     cp -r $install_dir/share/wine  $OUTPUT_DIR/share
+
+    # Strip the packaged binaries to shrink the tree. llvm-strip ($STRIP) handles PE (x86_64/i386) +
+    # ELF. --strip-all keeps the PE export directory + ELF .dynsym (so DLLs still resolve and .so still
+    # loads); falls back to --strip-debug. Non-fatal per file so an unexpected format can't fail the build.
+    echo "Stripping binaries with llvm-strip to shrink the tree..."
+    before_mb=$(du -sm "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+    find "$OUTPUT_DIR/lib" "$OUTPUT_DIR/bin" -type f \
+      \( -name '*.dll' -o -name '*.exe' -o -name '*.drv' -o -name '*.so' -o -name 'wine' -o -name 'wine-preloader' \) \
+      -print0 2>/dev/null | while IFS= read -r -d '' f; do
+        "$STRIP" --strip-all "$f" 2>/dev/null || "$STRIP" --strip-debug "$f" 2>/dev/null || true
+      done
+    after_mb=$(du -sm "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+    echo "OUTPUT tree: ${before_mb}MB -> ${after_mb}MB after strip."
 	# symlinking wine binaries to $install_dir/bin
     ln -sf ../lib/wine/x86_64-unix/wine "$install_dir/bin/wine"
     ln -sf ../lib/wine/x86_64-unix/wine "$OUTPUT_DIR/bin/wine"
